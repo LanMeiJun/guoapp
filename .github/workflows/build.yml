@@ -1,0 +1,79 @@
+name: Build Android packages
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: app-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOPROXY: https://proxy.golang.org,direct
+  GOSUMDB: sum.golang.org
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - edition: hongguojian
+            arguments: ''
+          - edition: zhenguojian
+            arguments: '--all-sources'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/go.mod
+          cache-dependency-path: native/go.sum
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - name: Install Android NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358"
+      - name: Configure Android signing
+        run: python scripts/configure_signing.py
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      - run: python scripts/build_android.py ${{ matrix.arguments }}
+      - name: Remove signing files
+        if: always()
+        run: python scripts/configure_signing.py --clean
+      - name: Publish Android APK to GitHub Release
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(python3 -c "import re, pathlib; print(re.search(r'^version:\s*(\S+)', pathlib.Path('pubspec.yaml').read_text(encoding='utf-8'), re.M).group(1).split('+')[0])")
+          TAG="v${VERSION}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "guoapp ${TAG} (Jian-UI)" --notes "简助手风格蓝白卡片 UI 的 guoapp 安装包"
+          gh release upload "$TAG" dist/android/* --clobber
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ matrix.edition }}-android
+          path: dist/android/*
+          if-no-files-found: ignore
+          retention-days: 14
